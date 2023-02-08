@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import TypeAlias, Optional
+import typing
+from typing import Any, Optional, Callable, TypeAlias
 from pathlib import Path
 import json
 import tkinter as tk
@@ -30,19 +31,32 @@ def get_current_font() -> tkfont.Font:
     return font
 
 
+def one_line_validate(text: str) -> bool:
+    return len(text.splitlines()) <= 1
+
+
+def difficulty_validate(difficulty: int) -> bool:
+    return difficulty > 0 and difficulty <= 10
+
+
+def note_color_validate(color: tuple[float, float, float]) -> bool:
+    return all([v >= 0 and v <= 1 for v in color])
+
+
 @dataclass
 class ColSpec:
     key: str | None
     width: int = 200
-    type: TypeAlias = str
+    data_type: TypeAlias = str
+    validate: Callable[[data_type], bool] | None = one_line_validate if data_type == str else None
 
 
 class ChartDataTable(tk.Frame):
-    def __init__(self, master, columns: list[ColSpec], chart_data_by_dir: dict[dict], *args, **kwargs):
+    def __init__(self, master, columns: list[ColSpec], chart_data_by_dir: dict[dict[str, Any]], *args, **kwargs):
         super().__init__(master, *args, **kwargs)
         self._columns: list[ColSpec] = columns
-        self._chart_data_by_dir: dict[dict] = chart_data_by_dir
-        self._chart_updates_by_dir: dict[dict] = {}
+        self._chart_data_by_dir: dict[dict[str, Any]] = chart_data_by_dir
+        self._chart_updates_by_dir: dict[dict[str, Any]] = {}
         self._border: int = 1
         self._sorted_column = None
         self._sorted_reverse = False
@@ -64,9 +78,10 @@ class ChartDataTable(tk.Frame):
         for chart_dir in chart_data_by_dir:
             chart_data = chart_data_by_dir[chart_dir]
             vals = [chart_dir] + [chart_data.get(key, "") for key in col_keys[1:]]
-            treeview.insert("", tk.END, values=vals)
+            treeview.insert("", tk.END, values=vals, iid=chart_dir)
         treeview.tag_configure("white", background="#ffffff")
         treeview.tag_configure("gray", background="#dddddd")
+        treeview.tag_configure("edited", background="#9999ff")
         self._color_lines()
 
         # Scrollbars
@@ -87,12 +102,12 @@ class ChartDataTable(tk.Frame):
         self._edit_field: tk.Text = tk.Text(self._edit_frame, font=font_spec)
         self._edit_field.pack(expand=True, fill=tk.BOTH, padx=self._border, pady=self._border)
         self._edit_coords: tuple[str, ...] | None = None
+        self._edit_field.bind("<Return>", self._on_edit_confirmation)
 
         # Events
         self._treeview.bind("<Button-1>", self._on_click_treeview)
         self._treeview.bind("<Double-Button-1>", self._on_double_click_treeview)
         self._edit_field.bind("<FocusOut>", self._on_lose_focus_edit_field)
-        return
 
     def _get_items(self) -> tuple[str, ...]:
         items = self._treeview.get_children("")
@@ -100,15 +115,17 @@ class ChartDataTable(tk.Frame):
 
     def _color_lines(self):
         items = self._get_items()
-        is_gray = False
+        is_gray = True
         for item in items:
-            self._treeview.item(item, tags="gray" if is_gray else "white")
+            tag = "edited" if item in self._chart_updates_by_dir else "gray" if is_gray else "white"
+            self._treeview.item(item, tags=tag)
             is_gray = not is_gray
 
     def _get_column_heading(self, col: str) -> str:
         return self._treeview.heading(col, option="text")
 
     def _edit_cell(self, row: str, col: str):
+        self._edit_coords = (row, col)
         old_val: str = self._treeview.set(row, column=col)
         x, y, w, h = self._treeview.bbox(row, column=col)
         border = self._border
@@ -116,7 +133,9 @@ class ChartDataTable(tk.Frame):
         self._edit_field.delete(1.0, tk.END)
         self._edit_field.insert(tk.END, old_val)
         self._edit_field.focus()
-        return
+
+    def _edit_field_hide(self):
+        self._edit_frame.place_forget()
 
     def _sort_by_column(self, col: str, reverse: bool = False):
         tree = self._treeview
@@ -125,6 +144,9 @@ class ChartDataTable(tk.Frame):
         for i, item in enumerate(items):
             tree.move(item, "", i)
         self._color_lines()
+
+    def _get_column_specification(self, column: str) -> ColSpec:
+        return self._columns[int(column[1:]) - 1]
 
     def _on_click_treeview(self, event: tk.Event):
         region = self._treeview.identify_region(event.x, event.y)
@@ -150,10 +172,49 @@ class ChartDataTable(tk.Frame):
             return
         if region == "heading":
             self._on_click_treeview(event)
+            return
 
     def _on_lose_focus_edit_field(self, event: tk.Event):
-        self._edit_frame.place_forget()
-        return
+        self._edit_field_hide()
+
+    def _on_edit_confirmation(self, event: tk.Event):
+        new_val_str = self._edit_field.get("1.0", tk.END)[:-1]
+        row, col = self._edit_coords
+        self._edit_field_hide()
+
+        col_spec = self._get_column_specification(col)
+        if not col_spec.data_type == str and new_val_str=="":
+            new_val_str = str(None)
+            new_val = None
+        else:
+            try:
+                data_type_origin = typing.get_origin(col_spec.data_type)
+                data_type_args = typing.get_args(col_spec.data_type)
+                if data_type_origin == tuple:
+                    new_val = new_val_str.split()
+                    if data_type_args:
+                        if len(data_type_args) != len(new_val):
+                            raise TypeError()
+                        new_val = [t(v) for v, t in zip(new_val, data_type_args)]
+                if data_type_origin == list:
+                    new_val = new_val_str.split()
+                    if data_type_args:
+                        new_val = [data_type_args[0](v) for v in new_val]
+                else:
+                    new_val = col_spec.data_type(new_val_str)
+            except:
+                print("ERROR: New value has wrong data type.")
+                return
+            if not col_spec.validate is None and not col_spec.validate():
+                print("ERROR: Invalid new value.")
+                return
+
+        self._treeview.set(row, column=col, value=new_val_str)
+        if row not in self._chart_updates_by_dir:
+            self._chart_updates_by_dir[row] = {col: new_val_str}
+        else:
+            self._chart_updates_by_dir[row][col] = new_val
+        self._color_lines()
 
 
 @dataclass
@@ -269,18 +330,18 @@ def main():
             ColSpec(key="shortName"),
             ColSpec(key="name", width=250),
             ColSpec(key="author", width=150),
-            ColSpec(key="year", width=40),
+            ColSpec(key="year", width=40, data_type=int),
             ColSpec(key="genre", width=100),
-            ColSpec(key="description", width=600),
-            ColSpec(key="difficulty", width=40),
-            ColSpec(key="tempo", width=40),
-            ColSpec(key="timesig", width=40),
-            ColSpec(key="endpoint", width=40),
-            ColSpec(key="savednotespacing", width=40),
-            ColSpec(key="note_color_start"),
-            ColSpec(key="note_color_end"),
+            ColSpec(key="description", width=600, validate=None),
+            ColSpec(key="difficulty", width=40, data_type=int, validate=difficulty_validate),
+            ColSpec(key="tempo", width=40, data_type=float),
+            ColSpec(key="timesig", width=40, data_type=int),
+            ColSpec(key="endpoint", width=40, data_type=float),
+            ColSpec(key="savednotespacing", width=40, data_type=float),
+            ColSpec(key="note_color_start", data_type=tuple[float, float, float], validate=note_color_validate),
+            ColSpec(key="note_color_end", data_type=tuple[float, float, float], validate=note_color_validate),
             # ColSpec(key="bgdata"),
-            ColSpec(key="UNK1", width=50),
+            ColSpec(key="UNK1", width=50, data_type=int),
             # ColSpec(key="notes"),
             # ColSpec(key="lyrics"),
         ]
