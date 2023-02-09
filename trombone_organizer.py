@@ -31,35 +31,99 @@ def get_current_font() -> tkfont.Font:
     return font
 
 
-def one_line_validate(text: str) -> bool:
-    return len(text.splitlines()) <= 1
+def one_line_from_str(s: str) -> str:
+    if len(s.splitlines()) > 1:
+        raise ValueError("Expected one line.")
+    return s
 
 
-def difficulty_validate(difficulty: int) -> bool:
-    return difficulty > 0 and difficulty <= 10
+def positive_int_from_str(s: str) -> int:
+    if s == "":
+        raise ValueError("Expected an integer.")
+    n = int(s)
+    if n < 0:
+        raise ValueError("Expected positive integer.")
+    return n
 
 
-def note_color_validate(color: tuple[float, float, float]) -> bool:
-    return all([v >= 0 and v <= 1 for v in color])
+def positive_float_from_str(s: str) -> float | None:
+    if s == "":
+        raise ValueError("Expected a number.")
+    n = float(s)
+    if n < 0:
+        raise ValueError("Expected positive number.")
+    return n
+
+
+def positive_int_or_none_from_str(s: str) -> int | None:
+    if s == "":
+        return None
+    return positive_int_from_str(s)
+
+
+def positive_float_or_none_from_str(s: str) -> float | None:
+    if s == "":
+        return None
+    return positive_float_from_str(s)
+
+
+def difficulty_from_str(s: str) -> int:
+    if s == "":
+        raise ValueError("Expected an integer.")
+    d = int(s)
+    if d <= 0 or d > 10:
+        raise ValueError("Expected integer between 1 and 10.")
+    return d
+
+
+def note_color_from_str(s: str) -> tuple[float, float, float] | None:
+    if s == "":
+        return None
+    vals_str = s.split()
+    if len(vals_str) != 3:
+        raise ValueError("Expected 3 values.")
+    vals = [float(v) for v in vals_str]
+    if any([v < 0 or v > 1 for v in vals]):
+        raise ValueError("Expected values between 0 and 1")
+    return vals
 
 
 @dataclass
 class ColSpec:
     key: str | None
     width: int = 200
-    data_type: TypeAlias = str
-    validate: Callable[[data_type], bool] | None = one_line_validate if data_type == str else None
+    from_str: Callable[[Any], bool] | None = None
+
+
+@dataclass
+class ChartError:
+    severity: str
+    message: str
+    chart: str
+    exception: Optional[Exception] = None
 
 
 class ChartDataTable(tk.Frame):
-    def __init__(self, master, columns: list[ColSpec], chart_data_by_dir: dict[dict[str, Any]], *args, **kwargs):
+    def __init__(self, master, columns: list[ColSpec], charts_dir: Path, *args, **kwargs):
         super().__init__(master, *args, **kwargs)
         self._columns: list[ColSpec] = columns
-        self._chart_data_by_dir: dict[dict[str, Any]] = chart_data_by_dir
-        self._chart_updates_by_dir: dict[dict[str, Any]] = {}
+        self._charts_dir: Path = charts_dir
+        self._chart_updates_by_dir: dict[str, dict[str, Any]] = {}
         self._border: int = 1
-        self._sorted_column = None
-        self._sorted_reverse = False
+        self._sorted_column: str | None = None
+        self._sorted_reverse: bool = False
+
+        # Read custom chart data
+        self._chart_data_by_dir: dict[dict[str, Any]]
+        errors: list[ChartError]
+        try:
+            self._chart_data_by_dir, errors = self._read_chart_data()
+        except Exception as e:
+            fatal_error(text="Could not read custom song data from the specified directory.", exception=e)
+
+        # Report errors
+        if errors:
+            self._show_error_report(errors)
 
         # Treeview initialization
         col_keys = [col.key for col in self._columns]
@@ -75,8 +139,8 @@ class ChartDataTable(tk.Frame):
             treeview.heading(col.key, text=col.key)
 
         # Rows
-        for chart_dir in chart_data_by_dir:
-            chart_data = chart_data_by_dir[chart_dir]
+        for chart_dir in self._chart_data_by_dir:
+            chart_data = self._chart_data_by_dir[chart_dir]
             vals = [chart_dir] + [chart_data.get(key, "") for key in col_keys[1:]]
             treeview.insert("", tk.END, values=vals, iid=chart_dir)
         treeview.tag_configure("white", background="#ffffff")
@@ -103,11 +167,75 @@ class ChartDataTable(tk.Frame):
         self._edit_field.pack(expand=True, fill=tk.BOTH, padx=self._border, pady=self._border)
         self._edit_coords: tuple[str, ...] | None = None
         self._edit_field.bind("<Return>", self._on_edit_confirmation)
+        self._edit_field.bind("<Control-Return>", lambda e: None)
 
         # Events
         self._treeview.bind("<Button-1>", self._on_click_treeview)
         self._treeview.bind("<Double-Button-1>", self._on_double_click_treeview)
-        self._edit_field.bind("<FocusOut>", self._on_lose_focus_edit_field)
+        self._edit_field.bind("<FocusOut>", self._on_edit_confirmation)
+
+    def _read_chart_data(self) -> tuple[dict[str, dict], list[ChartError]]:
+        chart_data_by_dir: dict[str, dict] = {}
+        errors: list[ChartError] = []
+        for chart_dir in self._charts_dir.iterdir():
+            if not chart_dir.is_dir():
+                continue
+
+            chart_data_file = chart_dir / "song.tmb"
+
+            if not chart_data_file.exists():
+                errors.append(
+                    ChartError(chart=chart_dir.name, severity="Warning", message="No data file, song skipped.")
+                )
+                continue
+
+            try:
+                with chart_data_file.open(encoding="utf8") as chart_stream:
+                    chart_data: dict = json.load(chart_stream)
+            except Exception as e:
+                errors.append(
+                    ChartError(
+                        chart=chart_dir.name,
+                        severity="Error",
+                        message="Could not read JSON data, song skipped.",
+                        exception=e,
+                    )
+                )
+                continue
+
+            if not type(chart_data) == dict:
+                errors.append(
+                    ChartError(
+                        chart=chart_dir.name,
+                        severity="Error",
+                        message="JSON data from is not a dictionary, song skipped.",
+                    )
+                )
+                continue
+
+            chart_data_by_dir[chart_dir.name] = chart_data
+
+        return chart_data_by_dir, errors
+
+    def _show_error_report(self, errors: list[ChartError]):
+        errors_report = tk.Toplevel()
+        errors_report.title("Custom song error report")
+        cols = [
+            "Chart directory",
+            "Severity",
+            "Message",
+            "Exception",
+        ]
+        errors_table = ttk.Treeview(errors_report, show="headings", columns=cols)
+        errors_table.pack()
+
+        for col in cols:
+            errors_table.heading(col, text=col)
+
+        errs = [(err.chart, err.severity, err.message, str(err.exception)) for err in errors]
+        errs.sort()
+        for err_vals in errs:
+            errors_table.insert("", tk.END, values=err_vals)
 
     def _get_items(self) -> tuple[str, ...]:
         items = self._treeview.get_children("")
@@ -129,7 +257,13 @@ class ChartDataTable(tk.Frame):
         old_val: str = self._treeview.set(row, column=col)
         x, y, w, h = self._treeview.bbox(row, column=col)
         border = self._border
-        self._edit_frame.place(x=x - border, y=y - border, width=w + 2 * border, height=h + 2 * border)
+        col_spec = self._get_column_specification(col)
+        self._edit_frame.place(
+            x=x - border,
+            y=y - border,
+            width=600 if col_spec.key == "description" else 300,
+            height=None if col_spec.key == "description" else h + 2 * border,
+        )
         self._edit_field.delete(1.0, tk.END)
         self._edit_field.insert(tk.END, old_val)
         self._edit_field.focus()
@@ -174,97 +308,82 @@ class ChartDataTable(tk.Frame):
             self._on_click_treeview(event)
             return
 
-    def _on_lose_focus_edit_field(self, event: tk.Event):
-        self._edit_field_hide()
-
     def _on_edit_confirmation(self, event: tk.Event):
-        new_val_str = self._edit_field.get("1.0", tk.END)[:-1]
+        new_val_str = self._edit_field.get("1.0", tk.END).strip()
         row, col = self._edit_coords
         self._edit_field_hide()
+        if new_val_str == self._treeview.set(row, column=col):
+            return
 
         col_spec = self._get_column_specification(col)
-        if not col_spec.data_type == str and new_val_str=="":
-            new_val_str = str(None)
-            new_val = None
-        else:
-            try:
-                data_type_origin = typing.get_origin(col_spec.data_type)
-                data_type_args = typing.get_args(col_spec.data_type)
-                if data_type_origin == tuple:
-                    new_val = new_val_str.split()
-                    if data_type_args:
-                        if len(data_type_args) != len(new_val):
-                            raise TypeError()
-                        new_val = [t(v) for v, t in zip(new_val, data_type_args)]
-                if data_type_origin == list:
-                    new_val = new_val_str.split()
-                    if data_type_args:
-                        new_val = [data_type_args[0](v) for v in new_val]
-                else:
-                    new_val = col_spec.data_type(new_val_str)
-            except:
-                print("ERROR: New value has wrong data type.")
-                return
-            if not col_spec.validate is None and not col_spec.validate():
-                print("ERROR: Invalid new value.")
-                return
+        try:
+            new_val = col_spec.from_str(new_val_str)
+        except Exception as e:
+            print("INFO: Could not update value.")
+            print(e)
+            print()
+            return
 
         self._treeview.set(row, column=col, value=new_val_str)
+        col_heading = self._get_column_heading(col)
         if row not in self._chart_updates_by_dir:
-            self._chart_updates_by_dir[row] = {col: new_val_str}
+            self._chart_updates_by_dir[row] = {col_heading: new_val_str}
         else:
-            self._chart_updates_by_dir[row][col] = new_val
+            self._chart_updates_by_dir[row][col_heading] = new_val
         self._color_lines()
 
-
-@dataclass
-class ChartReadError:
-    severity: str
-    message: str
-    chart: str
-    exception: Optional[Exception] = None
-
-
-def read_chart_data(charts_dir: Path) -> tuple[dict[str, dict], list[ChartReadError]]:
-    chart_data_by_dir: dict[str, dict] = {}
-    errors: list[ChartReadError] = []
-    for chart_dir in charts_dir.iterdir():
-        if not chart_dir.is_dir():
-            continue
-
-        chart_data_file = chart_dir / "song.tmb"
-
-        if not chart_data_file.exists():
-            errors.append(
-                ChartReadError(chart=chart_dir.name, severity="Warning", message="No data file, song skipped.")
-            )
-            continue
-
-        try:
-            with chart_data_file.open(encoding="utf8") as chart_stream:
-                chart_data: dict = json.load(chart_stream)
-        except Exception as e:
-            errors.append(
-                ChartReadError(
-                    chart=chart_dir.name,
-                    severity="Error",
-                    message="Could not read JSON data, song skipped.",
-                    exception=e,
+    def apply_edits(self):
+        errors = []
+        for dir in self._chart_updates_by_dir:
+            try:
+                with (self._charts_dir / dir / "song.tmb").open(encoding="utf8") as chart_stream:
+                    chart_data: dict[str, Any] = json.load(chart_stream)
+            except Exception as e:
+                errors.append(
+                    ChartError(
+                        chart=dir,
+                        severity="Error",
+                        message="Could not read chart data to update, song skipped.",
+                        exception=e,
+                    )
                 )
-            )
-            continue
+                continue
 
-        if not type(chart_data) == dict:
-            errors.append(
-                ChartReadError(
-                    chart=chart_dir.name, severity="Error", message="JSON data from is not a dictionary, song skipped."
+            if not type(chart_data) == dict:
+                errors.append(
+                    ChartError(
+                        chart=dir,
+                        severity="Error",
+                        message="JSON data from is not a dictionary, song skipped.",
+                    )
                 )
-            )
-            continue
+                continue
 
-        chart_data_by_dir[chart_dir.name] = chart_data
+            updates = self._chart_updates_by_dir[dir]
+            chart_data.update(updates)
 
-    return chart_data_by_dir, errors
+            for key in updates:
+                if updates[key] is None:
+                    del chart_data[key]
+
+            try:
+                with (self._charts_dir / dir / "song.tmb").open(mode="w", encoding="utf8") as chart_stream:
+                    json.dump(chart_data, chart_stream)
+            except Exception as e:
+                errors.append(
+                    ChartError(
+                        chart=dir,
+                        severity="Error",
+                        message="Could not update chart data file.",
+                        exception=e,
+                    )
+                )
+                continue
+
+        self._chart_updates_by_dir = {}
+        if errors:
+            self._show_error_report(errors)
+        self._color_lines()
 
 
 def main():
@@ -288,67 +407,44 @@ def main():
         charts_dir_win.mainloop()
 
         charts_dir = Path(charts_dir_var.get())
-        try:
-            chart_data_by_dir, errors = read_chart_data(charts_dir)
-        except Exception as e:
-            fatal_error(text="Could not read custom song data from the specified directory.", exception=e)
 
         main_win = tk.Tk()
         main_win.geometry("890x400")
         main_win.state("zoomed")
         main_win.title("Trombone Organizer")
 
-        if errors:
-            errors_report = tk.Toplevel(main_win)
-            errors_report.title("Custom song error report")
-            cols = [
-                "Chart directory",
-                "Severity",
-                "Message",
-                "Exception",
-            ]
-            errors_table = ttk.Treeview(errors_report, show="headings", columns=cols)
-            errors_table.pack()
-
-            for col in cols:
-                errors_table.heading(col, text=col)
-
-            errs = [(err.chart, err.severity, err.message, str(err.exception)) for err in errors]
-            errs.sort()
-            for err_vals in errs:
-                errors_table.insert("", tk.END, values=err_vals)
-
-        menubar = tk.Menu(main_win)
-        main_win.config(menu=menubar)
-        file_menu = tk.Menu(menubar, tearoff=False)
-        file_menu.add_command(label="Exit", command=main_win.destroy)
-        menubar.add_cascade(label="File", menu=file_menu, underline=0)
-
         cols = [
             ColSpec(key=DIR_KEY, width=80),
-            ColSpec(key="trackRef", width=80),
-            ColSpec(key="shortName"),
-            ColSpec(key="name", width=250),
-            ColSpec(key="author", width=150),
-            ColSpec(key="year", width=40, data_type=int),
-            ColSpec(key="genre", width=100),
-            ColSpec(key="description", width=600, validate=None),
-            ColSpec(key="difficulty", width=40, data_type=int, validate=difficulty_validate),
-            ColSpec(key="tempo", width=40, data_type=float),
-            ColSpec(key="timesig", width=40, data_type=int),
-            ColSpec(key="endpoint", width=40, data_type=float),
-            ColSpec(key="savednotespacing", width=40, data_type=float),
-            ColSpec(key="note_color_start", data_type=tuple[float, float, float], validate=note_color_validate),
-            ColSpec(key="note_color_end", data_type=tuple[float, float, float], validate=note_color_validate),
+            ColSpec(key="trackRef", width=80, from_str=one_line_from_str),
+            ColSpec(key="shortName", from_str=one_line_from_str),
+            ColSpec(key="name", width=250, from_str=one_line_from_str),
+            ColSpec(key="author", width=150, from_str=one_line_from_str),
+            ColSpec(key="year", width=40, from_str=positive_int_from_str),
+            ColSpec(key="genre", width=100, from_str=one_line_from_str),
+            ColSpec(key="description", width=600),
+            ColSpec(key="difficulty", width=40, from_str=difficulty_from_str),
+            ColSpec(key="tempo", width=40, from_str=positive_float_from_str),
+            ColSpec(key="timesig", width=40, from_str=positive_int_from_str),
+            ColSpec(key="endpoint", width=40, from_str=positive_float_from_str),
+            ColSpec(key="savednotespacing", width=40, from_str=positive_float_from_str),
+            ColSpec(key="note_color_start", from_str=note_color_from_str),
+            ColSpec(key="note_color_end", from_str=note_color_from_str),
             # ColSpec(key="bgdata"),
-            ColSpec(key="UNK1", width=50, data_type=int),
+            ColSpec(key="UNK1", width=50, from_str=positive_int_or_none_from_str),
             # ColSpec(key="notes"),
             # ColSpec(key="lyrics"),
         ]
         main_win.grid_rowconfigure(0, weight=1)
         main_win.grid_columnconfigure(0, weight=1)
-        table = ChartDataTable(main_win, cols, chart_data_by_dir)
+        table = ChartDataTable(main_win, cols, charts_dir)
         table.grid(row=0, column=0, sticky=tk.NSEW)
+
+        menubar = tk.Menu(main_win)
+        main_win.config(menu=menubar)
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="Apply edits", command=table.apply_edits)
+        file_menu.add_command(label="Exit", command=main_win.destroy)
+        menubar.add_cascade(label="File", menu=file_menu, underline=0)
 
         main_win.mainloop()
     except Exception as e:
