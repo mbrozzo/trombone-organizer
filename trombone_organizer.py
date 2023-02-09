@@ -172,6 +172,7 @@ class ChartDataTable(tk.Frame):
         self._edit_coords: tuple[str, ...] | None = None
         self._edit_field.bind("<Return>", self._on_edit_confirmation)
         self._edit_field.bind("<Control-Return>", lambda e: None)
+        self._edit_field.bind("<Shift-Return>", lambda e: None)
 
         # Events
         self._treeview.bind("<Button-1>", self._on_click_treeview)
