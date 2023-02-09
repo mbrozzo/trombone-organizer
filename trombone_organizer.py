@@ -179,7 +179,7 @@ class ChartDataTable(tk.Frame):
         treeview.tag_configure("white", background="#ffffff")
         treeview.tag_configure("gray", background="#dddddd")
         treeview.tag_configure("edited", background="#9999ff")
-        self._color_lines()
+        self._sort_by_column("#1")
 
         # Scrollbars
         self._scrollbar_v: ttk.Scrollbar = ttk.Scrollbar(self, orient="vertical", command=treeview.yview)
