@@ -190,7 +190,7 @@ class ChartDataTable(tk.Frame):
 
             if not chart_data_file.exists():
                 errors.append(
-                    ChartError(chart=chart_dir.name, severity="Warning", message="No data file, song skipped.")
+                    ChartError(chart=chart_dir.name, severity="Info", message="No data file, song skipped.")
                 )
                 continue
 
