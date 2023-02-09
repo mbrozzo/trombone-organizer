@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import tkinter as tk
 import tkinter.font as tkfont
+import tkinter.messagebox as tkmsgbox
 from tkinter import ttk
 
 DIR_KEY = "Directory"
@@ -92,7 +93,7 @@ def note_color_from_str(s: str) -> tuple[float, float, float] | None:
 class ColSpec:
     key: str | None
     width: int = 200
-    from_str: Callable[[Any], bool] | None = None
+    from_str: Callable[[Any], Any] = lambda x: x
 
 
 @dataclass
@@ -104,10 +105,12 @@ class ChartError:
 
 
 class ChartDataTable(tk.Frame):
-    def __init__(self, master, columns: list[ColSpec], charts_dir: Path, *args, **kwargs):
+    def __init__(self, master, columns: list[ColSpec], charts_dir: Path, main_window: tk.Tk = None, *args, **kwargs):
         super().__init__(master, *args, **kwargs)
         self._columns: list[ColSpec] = columns
         self._charts_dir: Path = charts_dir
+        self._main_window = master if main_window is None else main_window
+
         self._chart_updates_by_dir: dict[str, dict[str, Any]] = {}
         self._border: int = 1
         self._sorted_column: str | None = None
@@ -119,6 +122,7 @@ class ChartDataTable(tk.Frame):
         try:
             self._chart_data_by_dir, errors = self._read_chart_data()
         except Exception as e:
+            self._main_window.destroy()
             fatal_error(text="Could not read custom song data from the specified directory.", exception=e)
 
         # Report errors
@@ -385,6 +389,28 @@ class ChartDataTable(tk.Frame):
             self._show_error_report(errors)
         self._color_lines()
 
+    def on_close(self):
+        if not self._chart_updates_by_dir:
+            self._main_window.destroy()
+            return
+        response = tkmsgbox.askyesnocancel(
+            "Save changes?",
+            "There are unsaved changes. Do you wish to apply them before quitting?",
+            parent=self,
+            default=tkmsgbox.CANCEL,
+            icon=tkmsgbox.QUESTION,
+        )
+        print(response)
+        match response:
+            case True:
+                self.apply_edits()
+                self._main_window.destroy()
+            case False:
+                self._main_window.destroy()
+                return
+            case None:
+                return
+
 
 def main():
     try:
@@ -445,6 +471,8 @@ def main():
         file_menu.add_command(label="Apply edits", command=table.apply_edits)
         file_menu.add_command(label="Exit", command=main_win.destroy)
         menubar.add_cascade(label="File", menu=file_menu, underline=0)
+
+        main_win.protocol("WM_DELETE_WINDOW", table.on_close)
 
         main_win.mainloop()
     except Exception as e:
