@@ -1,14 +1,43 @@
 from dataclasses import dataclass
 import typing
-from typing import Any, Optional, Callable, TypeAlias
+from typing import Any, Optional, Callable
 from pathlib import Path
 import json
 import tkinter as tk
 import tkinter.font as tkfont
 import tkinter.messagebox as tkmsgbox
 from tkinter import ttk
+from functools import total_ordering
 
 DIR_KEY = "Directory"
+
+# https://stackoverflow.com/questions/12971631/sorting-list-by-an-attribute-that-can-be-none
+@total_ordering
+class Min(object):
+    def __new__(cls):
+        if not hasattr(cls, "instance"):
+            cls.instance = super(Min, cls).__new__(cls)
+        return cls.instance
+
+    def __le__(self, other):
+        return True
+
+    def __eq__(self, other):
+        return self is other
+
+
+@total_ordering
+class Max(object):
+    def __new__(cls):
+        if not hasattr(cls, "instance"):
+            cls.instance = super(Max, cls).__new__(cls)
+        return cls.instance
+
+    def __ge__(self, other):
+        return True
+
+    def __eq__(self, other):
+        return self is other
 
 
 def fatal_error(text: str = "", title: str = "Fatal Error", exception: Exception | None = None):
@@ -93,7 +122,7 @@ def note_color_from_str(s: str) -> tuple[float, float, float] | None:
 class ColSpec:
     key: str | None
     width: int = 200
-    from_str: Callable[[Any], Any] = lambda x: x
+    from_str: Callable[[str], Any] = lambda x: x
 
 
 @dataclass
@@ -189,9 +218,7 @@ class ChartDataTable(tk.Frame):
             chart_data_file = chart_dir / "song.tmb"
 
             if not chart_data_file.exists():
-                errors.append(
-                    ChartError(chart=chart_dir.name, severity="Info", message="No data file, song skipped.")
-                )
+                errors.append(ChartError(chart=chart_dir.name, severity="Info", message="No data file, song skipped."))
                 continue
 
             try:
@@ -277,9 +304,18 @@ class ChartDataTable(tk.Frame):
         self._edit_frame.place_forget()
 
     def _sort_by_column(self, col: str, reverse: bool = False):
+        col_spec = self._get_column_specification(col)
         tree = self._treeview
         items = list(self._get_items())
-        items.sort(key=lambda item: tree.set(item, col), reverse=reverse)
+
+        def item_to_value(item):
+            try:
+                val = col_spec.from_str(tree.set(item, col))
+            except:
+                val = None
+            return Min() if val is None else val
+
+        items.sort(key=item_to_value, reverse=reverse)
         for i, item in enumerate(items):
             tree.move(item, "", i)
         self._color_lines()
